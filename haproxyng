@@ -1,0 +1,1045 @@
+#!/usr/bin/perl
+
+# haproxyng Munin Plugin
+# Multigraph plugin which monitors the haproxy service.
+#  (c) 2014-2015 Jonathan Wright <github@jon.than.io>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+# Configure the Perl Environment
+use warnings;
+use Carp;
+use Switch;
+
+# Import Modules
+use Munin::Plugin;
+use IO::Socket::UNIX qw( SOCK_STREAM );
+use Data::Dumper;
+
+# Configure Program details
+our ($_program, $_version, $_author);
+$_program = 'haproxyng';
+$_version = '1.0.0';
+$_author  = 'Jonathan Wright <github@jon.than.io>';
+
+use constant {
+  # Field names to locations for all the CSV data provided by HAProxy
+  STAT_PROXY_NAME               => 0,
+  STAT_SERVICE_NAME             => 1,
+  STAT_QUEUED_REQUESTS          => 2,
+  STAT_QUEUED_MAX               => 3,
+  STAT_SESSIONS_CURRENT         => 4,
+  STAT_SESSIONS_MAX             => 5,
+  STAT_SESSIONS_LIMIT           => 6,
+  STAT_CONNECTIONS_TOTAL        => 7,
+  STAT_BYTES_IN                 => 8,
+  STAT_BYTES_OUT                => 9,
+  STAT_REQUESTS_DENIED          => 10,
+  STAT_RESPONSES_DENIED         => 11,
+  STAT_REQUESTS_ERROR           => 12,
+  STAT_CONNECTIONS_ERROR        => 13,
+  STAT_RESPONSES_ERROR          => 14,
+  STAT_CONNECTIONS_RETRIED      => 15,
+  STAT_CONNECTIONS_REDISPATCHED => 16,
+  STAT_STATUS                   => 17,
+  STAT_WEIGHT                   => 18,
+  STAT_SERVER_ACTIVE            => 19, STAT_SERVERS_ACTIVE => 19,
+  STAT_SERVER_BACKUP            => 20, STAT_SERVERS_BACKUP => 20,
+  STAT_CHECKS_FAIL              => 21,
+  STAT_CHECKS_GO_DOWN           => 22,
+  STAT_CHECKS_LAST_CHANGE       => 23,
+  STAT_CHECKS_DOWNTIME          => 24,
+  STAT_QUEUED_LIMIT             => 25,
+  STAT_PID                      => 26,
+  STAT_UID                      => 27,
+  STAT_SID                      => 28,
+  STAT_THROTTLE                 => 29,
+  STAT_SESSIONS_TOTAL           => 30,
+  STAT_TRACKED                  => 31,
+  STAT_SERVICE_TYPE             => 32,
+  STAT_SESSIONS_RATE_CURRENT    => 33,
+  STAT_SESSIONS_RATE_LIMIT      => 34,
+  STAT_SESSIONS_RATE_MAX        => 35,
+  STAT_CHECK_STATUS             => 36,
+  STAT_CHECK_CODE               => 37,
+  STAT_CHECK_DURATION           => 38,
+  STAT_RESPONSES_HTTP_1XX       => 39,
+  STAT_RESPONSES_HTTP_2XX       => 40,
+  STAT_RESPONSES_HTTP_3XX       => 41,
+  STAT_RESPONSES_HTTP_4XX       => 42,
+  STAT_RESPONSES_HTTP_5XX       => 43,
+  STAT_RESPONSES_HTTP_XXX       => 44,
+  STAT_CHECK_FAILED_DETAILS     => 45,
+  STAT_REQUESTS_RATE_CURRENT    => 46,
+  STAT_REQUESTS_RATE_MAX        => 47,
+  STAT_REQUESTS_TOTAL           => 48,
+  STAT_ABORTS_CLIENT            => 49,
+  STAT_ABORTS_SERVER            => 50,
+  STAT_COMPRESSOR_IN            => 51,
+  STAT_COMPRESSOR_OUT           => 52,
+  STAT_COMPRESSOR_BYPASSED      => 53,
+  STAT_COMPRESSOR_REQUESTS      => 54,
+  STAT_SESSIONS_LAST            => 55,
+  STAT_CHECK_HEALTH_LAST        => 56,
+  STAT_CHECK_AGENT_LAST         => 57,
+  STAT_TIME_QUEUE               => 58,
+  STAT_TIME_CONNECT             => 59,
+  STAT_TIME_RESPONSE            => 60,
+  STAT_TIME_TOTAL               => 61,
+  # Types used by HAProxy for some fields
+  TYPE_FRONTEND                 => 0,
+  TYPE_BACKEND                  => 1,
+  TYPE_SERVER                   => 2,
+  TYPE_LISTENER                 => 3,
+  # Types used to define which attributed to give a graph
+  TYPE_BANDWIDTH                => 0,
+  TYPE_TIMING                   => 1,
+  TYPE_SESSIONS                 => 2,
+  TYPE_RESPONSES                => 3,
+  TYPE_BACKENDS                 => 4,
+  # Program-specific constants
+  GRAPH_CATEGORY                => 'haproxyng',
+  GRAPH_WIDTH                   => 500,
+  FETCH                         => 0,
+  CONFIG                        => 1,
+  # Configurable limits
+  MAX_BANDWIDTH                 => (1024**3),
+  MAX_TIMING                    => (1200000),
+  MAX_SESSIONS                  => (10000),
+  MAX_RESPONSES                 => (100000),
+  MAX_BACKENDS                  => (1000),
+  # Constants to match Munin keywords
+  DERIVE                        => 'DERIVE',
+  GAUGE                         => 'GAUGE',
+  AREASTACK                     => 'AREASTACK',
+  LINE1                         => 'LINE1',
+  COLOUR_BLACK                  => '000000',
+};
+
+# Configure basic variables for program operation
+our ($_socket, $_clean, %data);
+# Get the location of the socket we'll connect to
+$_socket = exists $ENV{'socket'} ? $ENV{'socket'} : '/var/run/haproxy.sock';
+$_clean  = (exists $ENV{'clean'} ? quotemeta $ENV{'clean'} : '');
+
+MAIN: {
+  # This is a special multi-graph plugin, so make sure that whatever version
+  # of Munin we're running in is enabled and configured for it.
+  need_multigraph();
+
+  # Now work out what we are being asked to do, then run it.
+  my $request = $ARGV[0] || "fetch";
+  eval "do_${request}();"
+    or croak "do_${request}: $@";
+  # and then finish
+  exit 0;
+}
+
+sub get_data {
+  my ($t, %v); $t = shift;
+
+  my $s = IO::Socket::UNIX->new(
+    Peer    => $_socket,
+    Type    => SOCK_STREAM,
+    Timeout => 1
+  ) or croak "Cannot connect to socket ".$_socket;
+
+  print $s "show stat\n";
+  while (<$s>) {
+    chomp; next unless length;
+    my @stat = split (',');
+
+    switch ($stat[STAT_SERVICE_TYPE]) {
+      # Process all FRONTEND type entries; these are singular and are totals
+      # only for each of the frontends configured
+      case TYPE_FRONTEND {
+        $v{$stat[STAT_PROXY_NAME]} = {
+          type => TYPE_FRONTEND,
+          connections => $stat[STAT_CONNECTIONS_TOTAL],
+          sessions    => $stat[STAT_SESSIONS_CURRENT],
+          queued      => 0,
+          bandwidth   => {
+            in => $stat[STAT_BYTES_IN],
+            out => $stat[STAT_BYTES_OUT],
+          },
+          responses   => {
+            total     => $stat[STAT_REQUESTS_TOTAL],
+            http1xx   => $stat[STAT_RESPONSES_HTTP_1XX],
+            http2xx   => $stat[STAT_RESPONSES_HTTP_2XX],
+            http3xx   => $stat[STAT_RESPONSES_HTTP_3XX],
+            http4xx   => $stat[STAT_RESPONSES_HTTP_4XX],
+            http5xx   => $stat[STAT_RESPONSES_HTTP_5XX],
+            httpxxx   => $stat[STAT_RESPONSES_HTTP_XXX],
+          },
+        };
+      }
+      # Process all BACKEND type entries; these are the totals for each backend
+      # and don't have the same amount of information as SERVERs
+      case TYPE_BACKEND {
+        # We can't 'set' the hash here as the backend totals are normally after
+        # the backend's servers, so would override anything previously set
+        # in TYPE_SERVER
+        $v{$stat[STAT_PROXY_NAME]}{'type'} = TYPE_BACKEND;
+        $v{$stat[STAT_PROXY_NAME]}{'connections'} = $stat[STAT_CONNECTIONS_TOTAL];
+        $v{$stat[STAT_PROXY_NAME]}{'sessions'} = $stat[STAT_SESSIONS_CURRENT];
+        $v{$stat[STAT_PROXY_NAME]}{'queued'} = $stat[STAT_QUEUED_REQUESTS];
+        $v{$stat[STAT_PROXY_NAME]}{'active'} = $stat[STAT_SERVERS_ACTIVE];
+        $v{$stat[STAT_PROXY_NAME]}{'backup'} = $stat[STAT_SERVERS_BACKUP];
+        $v{$stat[STAT_PROXY_NAME]}{'bandwidth'} = {
+          in => $stat[STAT_BYTES_IN],
+          out => $stat[STAT_BYTES_OUT],
+        };
+        $v{$stat[STAT_PROXY_NAME]}{'responses'} = {
+            total     => $stat[STAT_RESPONSES_HTTP_1XX]
+                      +  $stat[STAT_RESPONSES_HTTP_2XX]
+                      +  $stat[STAT_RESPONSES_HTTP_3XX]
+                      +  $stat[STAT_RESPONSES_HTTP_4XX]
+                      +  $stat[STAT_RESPONSES_HTTP_5XX]
+                      +  $stat[STAT_RESPONSES_HTTP_XXX],
+            http1xx   => $stat[STAT_RESPONSES_HTTP_1XX],
+            http2xx   => $stat[STAT_RESPONSES_HTTP_2XX],
+            http3xx   => $stat[STAT_RESPONSES_HTTP_3XX],
+            http4xx   => $stat[STAT_RESPONSES_HTTP_4XX],
+            http5xx   => $stat[STAT_RESPONSES_HTTP_5XX],
+            httpxxx   => $stat[STAT_RESPONSES_HTTP_XXX],
+        };
+      }
+      # Process all SERVER type entries, which are the most details and give
+      # information about how each server is responding
+      case TYPE_SERVER {
+        # Only set the server itself directly, otherwise we may override
+        # anything previously set
+        $v{$stat[STAT_PROXY_NAME]}{'servers'}{$stat[STAT_SERVICE_NAME]} = {
+          active      => ($stat[STAT_SERVER_ACTIVE] ? 1 : 0),
+          backup      => ($stat[STAT_SERVER_BACKUP] ? 1 : 0),
+          up          => ($stat[STAT_STATUS] eq 'UP' ? 1 : 0),
+          down        => ($stat[STAT_STATUS] eq 'DOWN' ? 1 : 0),
+          disabled    => ($stat[STAT_STATUS] =~ /^(MAINT|DRAIN|NOLB)/i ? 1 : 0),
+          connections => $stat[STAT_CONNECTIONS_TOTAL],
+          sessions    => $stat[STAT_SESSIONS_CURRENT],
+          queued      => $stat[STAT_QUEUED_REQUESTS],
+          bandwidth   => {
+            in => $stat[STAT_BYTES_IN],
+            out => $stat[STAT_BYTES_OUT],
+          },
+          status      => $stat[STAT_STATUS],
+          timing      => {
+            queue     => $stat[STAT_TIME_QUEUE],
+            connect   => $stat[STAT_TIME_CONNECT],
+            response  => $stat[STAT_TIME_RESPONSE],
+            total     => $stat[STAT_TIME_TOTAL]
+          },
+          responses   => {
+            total     => $stat[STAT_RESPONSES_HTTP_1XX]
+                      +  $stat[STAT_RESPONSES_HTTP_2XX]
+                      +  $stat[STAT_RESPONSES_HTTP_3XX]
+                      +  $stat[STAT_RESPONSES_HTTP_4XX]
+                      +  $stat[STAT_RESPONSES_HTTP_5XX]
+                      +  $stat[STAT_RESPONSES_HTTP_XXX],
+            http1xx   => $stat[STAT_RESPONSES_HTTP_1XX],
+            http2xx   => $stat[STAT_RESPONSES_HTTP_2XX],
+            http3xx   => $stat[STAT_RESPONSES_HTTP_3XX],
+            http4xx   => $stat[STAT_RESPONSES_HTTP_4XX],
+            http5xx   => $stat[STAT_RESPONSES_HTTP_5XX],
+            httpxxx   => $stat[STAT_RESPONSES_HTTP_XXX],
+          },
+        };
+      }
+    }
+  }
+
+  # print Dumper(\%v);
+  return %v;
+}
+
+sub mg_fetch {
+  my ($type, $name, $values) = (shift, shift, shift);
+
+  my %values_ = %{$values};
+  my $type_ = $type eq TYPE_FRONTEND ? '_fe' :
+              $type eq TYPE_BACKEND  ? '_be' : '';
+
+  my $name_;
+  foreach my $level (@{$name}) {
+    $level =~ s/[^a-z0-9]+/_/g;
+    $name_ .= ($name_ ? '.' : '').$level;
+  }
+
+  printf "multigraph %s%s_%s\n", GRAPH_CATEGORY, $type_, $name_;
+  foreach my $key (sort keys %values_) {
+    (my $key_ = $key) =~ s/[^a-z0-9]+/_/g;
+    printf "%s.value %0.0f\n", $key_, $values_{$key};
+  }
+  print "\n";
+}
+
+sub mg_config {
+  my ($graph, $type, $name, $title, $metrics) = (shift, shift, shift, shift, shift, shift);
+
+  my %metrics_ = %{$metrics};
+
+  my $type_  = $type eq TYPE_FRONTEND ? '_fe' :
+               $type eq TYPE_BACKEND  ? '_be' : '';
+
+     $title  =~ s/$_clean//g if $_clean;
+  my $title_ = $type eq TYPE_FRONTEND ? ' Frontend' :
+               $type eq TYPE_BACKEND  ? ' Backend' : '';
+
+  my $name_;
+  foreach my $level (@{$name}) {
+    next unless $level;
+    $level =~ s/[^a-z0-9]+/_/g;
+    $name_ .= ($name_ ? '.' : '').$level;
+  }
+
+  my $max = undef;
+
+  printf "multigraph %s%s_%s\n", GRAPH_CATEGORY, $type_, $name_;
+  printf "graph_category %s\n", GRAPH_CATEGORY;
+  printf "graph_title HAProxy%s %s\n", $title_, $title;
+  printf "graph_width %d\n", GRAPH_WIDTH;
+
+  switch ($graph) {
+    case TYPE_BANDWIDTH {
+      print "graph_args --base 1024\n".
+            "graph_vlabel bits/second [in(-); out(+)]\n";
+      $max = MAX_BANDWIDTH;
+    }
+    case TYPE_TIMING {
+      print "graph_args --base 1000\n".
+            "graph_vlabel Time in Seconds\n";
+      $max = MAX_TIMING;
+    }
+    case TYPE_SESSIONS {
+      print "graph_args --base 1000\n".
+            "graph_vlabel [Queued(-); Sessions(+)]\n";
+      $max = MAX_SESSIONS;
+    }
+    case TYPE_RESPONSES {
+      print "graph_args --base 1000\n".
+            "graph_vlabel Responses per Second\n";
+      $max = MAX_RESPONSES;
+    }
+    case TYPE_BACKENDS {
+      print "graph_args --base 1000\n".
+            "graph_vlabel Total Backends\n";
+      $max = MAX_BACKENDS;
+    }
+  }
+
+  foreach my $metric (sort keys %metrics_) {
+    (my $metric_ = $metric) =~ s/[^a-z0-9]+/_/g;
+    foreach my $key (keys %{$metrics_{$metric}}) {
+      switch ($key) {
+        case 'label' {
+          my $value = $metrics_{$metric}{$key};
+             $value =~ s/$_clean//g if $_clean;
+          printf "%s.%s %s\n", $metric_, $key, $value;
+        }
+        case 'cdef' {
+          printf "%s.%s %s\n", $metric_, $key, $metric_.','.$metrics_{$metric}{$key};
+        }
+        case 'negative' {
+          my $value = $metrics_{$metric}{$key};
+             $value =~ s/[^a-z0-9]+/_/g;
+          printf "%s.%s %s\n", $metric_, $key, $value;
+        }
+
+        printf "%s.%s %s\n", $metric_, $key, $metrics_{$metric}{$key};
+      }
+    }
+    # Always add min/max if max has been defined
+    if ($max) {
+      printf "%s.%s %s\n", $metric_, 'min', 0;
+      printf "%s.%s %s\n", $metric_, 'max', $max if $max;
+    }
+  }
+  print "\n";
+}
+
+# frontend(bandwidth)
+# backend(bandwidth)
+# frontend(bandwidth/service)
+# backend(bandwidth/service)
+# backend(bandwidth/service/host)
+
+sub haproxy_bandwidth {
+  my ($operation, $data_) = (shift, shift);
+  my %data = %{$data_};
+
+  switch ($operation) {
+
+    case CONFIG {
+
+      my (%fe_metrics, %be_metrics, %submetrics);
+
+      foreach my $service (sort keys %data) {
+        undef %submetrics;
+
+        # Prepare the field configuration
+        my %in = (
+          label     => $service,
+          type      => DERIVE,
+          cdef      => '8,*',
+          graph     => 'no',
+        );
+        my %out = (
+          label     => $service,
+          type      => DERIVE,
+          cdef      => '8,*',
+          draw      => AREASTACK,
+          negative  => "${service}_in",
+        );
+
+        # This will copy the hash for the main metric
+        switch ($data{$service}{'type'}) {
+          case TYPE_FRONTEND {
+            %{$fe_metrics{"${service}_in"}} = %in;
+            %{$fe_metrics{"${service}_out"}} = %out;
+
+          }
+          case TYPE_BACKEND {
+            %{$be_metrics{"${service}_in"}} = %in;
+            %{$be_metrics{"${service}_out"}} = %out;
+          }
+        }
+
+        # next unless $data{$service}{'type'} eq TYPE_BACKEND;
+
+        # Override these for the totals in the sub metric graph
+        $in{'label'} = $out{'label'} = 'Total';
+        $out{'negative'} = 'total_in';
+        $out{'draw'} = LINE1;
+
+        # This will copy the hash for the submetric
+        %{$submetrics{'total_in'}} = %in;
+        %{$submetrics{'total_out'}} = %out;
+          $submetrics{'total_out'}{'colour'} = COLOUR_BLACK;
+
+        # Loop through each of the available servers
+        foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+          next if $data{$service}{'servers'}{$server}{'backup'};
+          # Override these for the per-Service graph
+          $in{'label'} = $out{'label'} = $server;
+          $out{'negative'} = "${server}_in";
+          $out{'draw'} = AREASTACK;
+
+          # This will copy the hash for the submetric
+          %{$submetrics{"${server}_in"}} = %in;
+          %{$submetrics{"${server}_out"}} = %out;
+
+          # Override these for the per-Host graph
+          $in{'label'} = $out{'label'} = 'Bandwidth';
+          $out{'negative'} = 'total_in';
+          $out{'draw'} = LINE1;
+          $out{'colour'} = COLOUR_BLACK;
+
+          mg_config(TYPE_BANDWIDTH, $data{$service}{'type'}, ['bandwidth', $service, $server],
+                    'Bandwidth for '.$service.' via '.$server, {
+            total_in  => \%in,
+            total_out => \%out,
+          });
+
+          delete $out{'colour'};
+        }
+
+        mg_config(TYPE_BANDWIDTH, $data{$service}{'type'}, ['bandwidth', $service],
+                  'Bandwidth for '.$service, \%submetrics);
+      }
+
+      mg_config(TYPE_BANDWIDTH, TYPE_FRONTEND, ['bandwidth'],
+                'Bandwidth Overview', \%fe_metrics);
+      mg_config(TYPE_BANDWIDTH, TYPE_BACKEND, ['bandwidth'],
+                'Bandwidth Overview', \%be_metrics);
+
+    }
+
+    case FETCH {
+
+      my (%values);
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_FRONTEND;
+        $values{"${service}_in"}  = $data{$service}{'bandwidth'}{'in'};
+        $values{"${service}_out"} = $data{$service}{'bandwidth'}{'out'};
+      }
+
+      mg_fetch(TYPE_FRONTEND, ['bandwidth'], \%values);
+
+      undef %values;
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+        $values{"${service}_in"}  = $data{$service}{'bandwidth'}{'in'};
+        $values{"${service}_out"} = $data{$service}{'bandwidth'}{'out'};
+      }
+
+      mg_fetch(TYPE_BACKEND, ['bandwidth'], \%values);
+
+      foreach my $service (sort keys %data) {
+        %values = (
+          total_in  => $data{$service}{'bandwidth'}{'in'},
+          total_out => $data{$service}{'bandwidth'}{'out'},
+        );
+
+        foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+          next if $data{$service}{'servers'}{$server}{'backup'};
+          $values{"${server}_in"}  = $data{$service}{'servers'}{$server}{'bandwidth'}{'in'};
+          $values{"${server}_out"} = $data{$service}{'servers'}{$server}{'bandwidth'}{'out'};
+          mg_fetch($data{$service}{'type'}, ['bandwidth', $service, $server], {
+            total_in  => $data{$service}{'servers'}{$server}{'bandwidth'}{'in'},
+            total_out => $data{$service}{'servers'}{$server}{'bandwidth'}{'out'},
+          });
+        }
+
+        mg_fetch($data{$service}{'type'}, ['bandwidth', $service], \%values);
+
+      }
+
+    }
+  }
+}
+
+# backend(timing)
+# backend(timing/service)
+# backend(timing/service/host)
+
+sub haproxy_timing {
+  my ($operation, $data_) = (shift, shift);
+  my %data = %{$data_};
+
+  switch ($operation) {
+
+    case CONFIG {
+
+      my (%metrics, %submetrics);
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+
+        undef %submetrics;
+
+        # Prepare the field configuration
+        my %time = (
+          label     => $service,
+          type      => GAUGE,
+          cdef      => '1000,/',
+          draw      => LINE1,
+        );
+
+        # This will copy the hash for the main metric
+        %{$metrics{$service}} = %time;
+
+        # Loop through each of the available servers
+        foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+          next if $data{$service}{'servers'}{$server}{'backup'};
+          # Override these for the per-Service graph
+          $time{'label'} = $server;
+
+          # This will copy the hash for the submetric
+          %{$submetrics{$server}} = %time;
+
+          # Copy and override these for the per-Host graph
+          my %queue     = %time; $queue{'label'}    = 'Queue';
+          my %connect   = %time; $connect{'label'}  = 'Connect';
+          my %response  = %time; $response{'label'} = 'Response';
+          my %total     = %time; $total{'label'}    = 'Total';
+
+          mg_config(TYPE_TIMING, TYPE_BACKEND, ['timing', $service, $server],
+                    'Server Timing for '.$service.' via '.$server, {
+            queue     => \%queue,
+            connect   => \%connect,
+            response  => \%response,
+            total     => \%total,
+          });
+        }
+
+        mg_config(TYPE_TIMING, TYPE_BACKEND, ['timing', $service],
+                  'Server Timing for '.$service, \%submetrics);
+      }
+
+      mg_config(TYPE_TIMING, TYPE_BACKEND, ['timing'],
+                'Server Timing Overview', \%metrics);
+
+    }
+
+    case FETCH {
+
+      my (%values);
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+        my ($count, $total) = (0,0);
+        foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+          ++$count;
+          $total+=$data{$service}{'servers'}{$server}{'timing'}{'total'};
+        }
+
+        $values{$service} = ($total/$count);
+      }
+
+      mg_fetch(TYPE_BACKEND, ['timing'], \%values);
+
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+        undef %values;
+
+        foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+          next if $data{$service}{'servers'}{$server}{'backup'};
+          $values{$server} = $data{$service}{'servers'}{$server}{'timing'}{'total'};
+          mg_fetch(TYPE_BACKEND, ['timing', $service, $server],
+                   $data{$service}{'servers'}{$server}{'timing'});
+        }
+
+        mg_fetch(TYPE_BACKEND, ['timing', $service], \%values);
+
+      }
+
+    }
+  }
+}
+
+# frontend(sessions)
+# frontend(sessions/service)
+# backend(sessions)
+# backend(sessions/service)
+# backend(sessions/service/host)
+
+sub haproxy_sessions {
+  my ($operation, $data_) = (shift, shift);
+  my %data = %{$data_};
+
+  switch ($operation) {
+
+    case CONFIG {
+
+      my (%metrics, %submetrics);
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_FRONTEND;
+
+        my %sessions = (
+          label     => $service,
+          type      => GAUGE,
+          draw      => LINE1,
+        );
+
+        %{$metrics{"${service}_sessions"}} = %sessions;
+
+        # Override these for the per-Service graph
+        $sessions{'label'} = 'Sessions';
+
+        mg_config(TYPE_SESSIONS, TYPE_FRONTEND, ['sessions', $service],
+                  'Sessions for '.$service, {
+          sessions => \%sessions,
+        });
+      }
+
+      mg_config(TYPE_SESSIONS, TYPE_FRONTEND, ['sessions'],
+                'Sessions Overview', \%metrics);
+
+      undef %metrics;
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+
+        undef %submetrics;
+
+        # Prepare the field configuration
+        my %queued    = (
+          label     => $service,
+          type      => GAUGE,
+          graph     => 'no',
+        );
+        my %sessions  = (
+          label     => $service,
+          type      => GAUGE,
+          draw      => LINE1,
+          negative  => "${service}_queued",
+        );
+
+        # This will copy the hash for the main metric
+        %{$metrics{"${service}_queued"}} = %queued;
+        %{$metrics{"${service}_sessions"}} = %sessions;
+
+        # Override these for the totals in the sub metric graph
+        $queued{'label'} = $sessions{'label'} = 'Total';
+        $out{'negative'} = 'total_queued';
+        $out{'draw'} = LINE1;
+
+        # This will copy the hash for the submetric
+        %{$submetrics{'total_queued'}} = %queued;
+        %{$submetrics{'total_sessions'}} = %sessions;
+
+        # Loop through each of the available servers
+        foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+          next if $data{$service}{'servers'}{$server}{'backup'};
+          # Override these for the per-Service graph
+          $in{'label'} = $out{'label'} = $server;
+          $out{'negative'} = "${server}_queued";
+          $out{'draw'} = AREASTACK;
+
+          # This will copy the hash for the submetric
+          %{$submetrics{"${server}_queued"}} = %queued;
+          %{$submetrics{"${server}_sessions"}} = %sessions;
+
+          # Override these for the per-Host graph
+          $in{'label'} = $out{'label'} = 'Sessions';
+          $out{'negative'} = 'queued';
+          $out{'draw'} = LINE1;
+
+          mg_config(TYPE_SESSIONS, TYPE_BACKEND, ['sessions', $service, $server],
+                    'Sessions for '.$service.' via '.$server, {
+            queued    => \%queued,
+            sessions  => \%sessions,
+          });
+        }
+
+        mg_config(TYPE_SESSIONS, TYPE_BACKEND, ['sessions', $service],
+                  'Sessions for '.$service, \%submetrics);
+      }
+
+      mg_config(TYPE_SESSIONS, TYPE_BACKEND, ['sessions'],
+                'Sessions Overview', \%metrics);
+
+    }
+
+    case FETCH {
+
+      my (%values);
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_FRONTEND;
+        $values{"${service}_sessions"} = $data{$service}{'sessions'};
+        mg_fetch(TYPE_FRONTEND, ['sessions', $service], {
+          sessions => $data{$service}{'sessions'},
+        });
+      }
+
+      mg_fetch(TYPE_FRONTEND, ['sessions'], \%values);
+
+      undef %values;
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+        $values{"${service}_sessions"} = $data{$service}{'sessions'};
+        $values{"${service}_queued"} = $data{$service}{'queued'};
+      }
+
+      mg_fetch(TYPE_BACKEND, ['sessions'], \%values);
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+
+        %values = (
+          total_sessions => $data{$service}{'sessions'},
+          total_queued => $data{$service}{'queued'},
+        );
+
+        foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+          next if $data{$service}{'servers'}{$server}{'backup'};
+
+          $values{"${server}_sessions"} = $data{$service}{'servers'}{$server}{'sessions'};
+          $values{"${server}_queued"} = $data{$service}{'servers'}{$server}{'queued'};
+
+          mg_fetch(TYPE_BACKEND, ['sessions', $service, $server], {
+            sessions  => $data{$service}{'servers'}{$server}{'sessions'},
+            queued    => $data{$service}{'servers'}{$server}{'queued'},
+          });
+        }
+
+        mg_fetch(TYPE_BACKEND, ['sessions', $service], \%values);
+
+      }
+
+    }
+  }
+}
+
+# frontend(responses)
+# frontend(responses/service(status))
+# frontend(responses/service(status)/status)
+# backend(responses)
+# backend(responses/service(server))
+# backend(responses/service(server)/server)
+# backend(responses/service(status))
+# backend(responses/service(status)/status)
+# backend(responses/service(status)/status/server)
+
+sub haproxy_responses {
+  my ($operation, $data_) = (shift, shift);
+  my %data = %{$data_};
+
+  switch ($operation) {
+
+    case CONFIG {
+
+      my (%fe_metrics, %be_metrics, %submetrics, $subsubmetrics);
+
+      foreach my $service (sort keys %data) {
+        my %response = (
+          label     => $service,
+          type      => DERIVE,
+          draw      => LINE1,
+        );
+
+        switch ($data{$service}{'type'}) {
+          case TYPE_FRONTEND {
+            %{$fe_metrics{$service}} = %response;
+          }
+          case TYPE_BACKEND {
+            %{$be_metrics{$service}} = %response;
+          }
+        }
+
+        undef %submetrics;
+
+        foreach my $response (sort keys %{$data{$service}{'responses'}}) {
+          $response_ = ($response  =~ /([12345])xx$/ ? "HTTP ${1}xx" :
+                        $response  eq 'total'        ? "Total"       : "Other");
+          $draw_     = ($response_ eq 'Total'        ? LINE1       : AREASTACK);
+
+          %{$submetrics{$response}} = (
+            label   => $response_,
+            type    => DERIVE,
+            draw    => $draw_,
+          );
+
+          $submetrics{$response}{'colour'} = COLOUR_BLACK if $response eq 'total';
+
+          switch ($data{$service}{'type'}) {
+            case TYPE_FRONTEND {
+              mg_config(TYPE_RESPONSES, $data{$service}{'type'}, ['responses', $service, $response],
+                        "${response_} Responses for ${service}", {
+                responses => {
+                  label   => 'Responses',
+                  type    => DERIVE,
+                  draw    => LINE1,
+                }
+              });
+            }
+            case TYPE_BACKEND {
+
+              undef %subsubmetrics;
+
+              foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+                next if $data{$service}{'servers'}{$server}{'backup'};
+                %{$subsubmetrics{$server}} = (
+                  label   => $server,
+                  type    => DERIVE,
+                  draw    => AREASTACK,
+                );
+                mg_config(TYPE_RESPONSES, $data{$service}{'type'}, ['responses', $service, $response, $server],
+                          "${response_} Responses for ${service} via ${server}", {
+                  responses => {
+                    label   => 'Responses',
+                    type    => DERIVE,
+                    draw    => LINE1,
+                  }
+                });
+              }
+
+              %{$subsubmetrics{'total'}} = (
+                label   => 'Total',
+                type    => DERIVE,
+                draw    => LINE1,
+                colour  => COLOUR_BLACK,
+              );
+
+              mg_config(TYPE_RESPONSES, $data{$service}{'type'}, ['responses', $service, $response],
+                        "${response_} Responses for ${service}", \%subsubmetrics);
+            }
+          }
+
+        }
+
+        mg_config(TYPE_RESPONSES, $data{$service}{'type'}, ['responses', $service],
+                  'Responses for '.$service, \%submetrics);
+      }
+
+      mg_config(TYPE_RESPONSES, TYPE_FRONTEND, ['responses'],
+                'Responses Overview', \%fe_metrics);
+      mg_config(TYPE_RESPONSES, TYPE_BACKEND, ['responses'],
+                'Responses Overview', \%be_metrics);
+
+    }
+
+    case FETCH {
+
+      my (%values, %subvalues);
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_FRONTEND;
+        $values{$service} = $data{$service}{'responses'}{'total'};
+        mg_fetch(TYPE_FRONTEND, ['responses', $service], $data{$service}{'responses'});
+        foreach my $response (sort keys %{$data{$service}{'responses'}}) {
+          mg_fetch(TYPE_FRONTEND, ['responses', $service, $response], {
+            responses => $data{$service}{'responses'}{$response}
+          });
+        }
+      }
+
+      mg_fetch(TYPE_FRONTEND, ['responses'], \%values);
+
+      undef %values;
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+
+        $values{$service} = $data{$service}{'responses'}{'total'};
+
+        %subvalues = (
+          total => $data{$service}{'responses'}{'total'},
+        );
+
+        mg_fetch(TYPE_BACKEND, ['responses', $service], $data{$service}{'responses'});
+
+        foreach my $response (sort keys %{$data{$service}{'responses'}}) {
+          undef %subvalues;
+
+          foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+            next if $data{$service}{'servers'}{$server}{'backup'};
+
+            $subvalues{$server} = $data{$service}{'servers'}{$server}{'responses'}{$response};
+            mg_fetch(TYPE_BACKEND, ['responses', $service, $response, $server], {
+              responses => $data{$service}{'servers'}{$server}{'responses'}{$response},
+            });
+          }
+
+          $subvalues{'total'} = $data{$service}{'responses'}{$response};
+
+          mg_fetch(TYPE_BACKEND, ['responses', $service, $response], \%subvalues);
+        }
+      }
+
+      mg_fetch(TYPE_BACKEND, ['responses'], \%values);
+
+    }
+
+  }
+}
+
+sub haproxy_count {
+  my ($operation, $data_) = (shift, shift);
+  my %data = %{$data_};
+
+  switch ($operation) {
+
+    case CONFIG {
+
+      my (%metrics, %submetrics);
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+
+        # Prepare the field configuration
+        my %count = (
+          label     => $service,
+          type      => GAUGE,
+          draw      => AREASTACK,
+        );
+
+        # This will copy the hash for the main metric
+        %{$metrics{$service}} = %count;
+          $metrics{$service}{'draw'} = LINE1;
+
+        # Copy and override these for the per-Service graph
+        my %backup    = %count; $backup{'label'}    = 'Backup';
+        my %down      = %count; $down{'label'}      = 'Down';
+        my %disabled  = %count; $disabled{'label'}  = 'Disabled';
+        my %up        = %count; $up{'label'}        = 'Up';
+
+        mg_config(TYPE_BACKEND, TYPE_BACKEND, ['count', $service],
+                  'Server Count for '.$service, {
+          backup    => \%backup,
+          down      => \%down,
+          disabled  => \%disabled,
+          up        => \%up,
+        });
+      }
+
+      mg_config(TYPE_BACKEND, TYPE_BACKEND, ['count'],
+                'Server Count Overview', \%metrics);
+
+    }
+
+    case FETCH {
+
+      my (%values);
+
+      foreach my $service (sort keys %data) {
+        next unless $data{$service}{'type'} eq TYPE_BACKEND;
+
+        my ($backup, $disabled, $down, $up) = (0,0,0,0);
+        foreach my $server (sort keys %{$data{$service}{'servers'}}) {
+          ++$backup   if $data{$service}{'servers'}{$server}{'backup'}
+                     and not $data{$service}{'servers'}{$server}{'down'}
+                     and not $data{$service}{'servers'}{$server}{'disabled'};
+          ++$disabled if $data{$service}{'servers'}{$server}{'disabled'};
+          ++$down     if $data{$service}{'servers'}{$server}{'down'};
+          ++$up       if $data{$service}{'servers'}{$server}{'up'}
+                     and not $data{$service}{'servers'}{$server}{'backup'};
+        }
+
+        $values{$service} = $up;
+
+        mg_fetch(TYPE_BACKEND, ['count', $service], {
+          backup    => $backup,
+          disabled  => $disabled,
+          down      => $down,
+          up        => $up,
+        });
+      }
+
+      mg_fetch(TYPE_BACKEND, ['count'], \%values);
+
+    }
+
+  }
+}
+
+sub do_fetch {
+  my %data = get_data;
+  exit 1 unless scalar(keys %data);
+
+  haproxy_bandwidth FETCH, \%data;
+  haproxy_timing FETCH, \%data;
+  haproxy_sessions FETCH, \%data;
+  haproxy_count FETCH, \%data;
+  haproxy_responses FETCH, \%data;
+
+  # Return something or the eval() will fail above
+  return 1;
+}
+
+sub do_config {
+  my %data = get_data;
+  exit 1 unless scalar(keys %data);
+
+  haproxy_bandwidth CONFIG, \%data;
+  haproxy_timing CONFIG, \%data;
+  haproxy_sessions CONFIG, \%data;
+  haproxy_count CONFIG, \%data;
+  haproxy_responses CONFIG, \%data;
+
+  return 1;
+}
+
+sub do_autoconf {
+  # All Munin wants to know is will this plugin provide all the configuration
+  # settings and options itself? Well, yes...
+  print "".(-S $_socket ? "yes" : "no")."\n";
+  return 1;
+}
