@@ -586,7 +586,7 @@ sub haproxy_timing {
           $total+=$data{$service}{'servers'}{$server}{'timing'}{'total'};
         }
 
-        $values{$service} = ($total/$count);
+        $values{$service} = ($count > 0 ? $total/$count : 0);
       }
 
       mg_fetch(TYPE_BACKEND, ['timing'], \%values);
