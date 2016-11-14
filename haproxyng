@@ -2,7 +2,7 @@
 
 # haproxyng Munin Plugin
 # Multigraph plugin which monitors the haproxy service.
-#  (c) 2014-2015 Jonathan Wright <github@jon.than.io>
+#  (c) 2014-2015 Jonathan Wright <jon@than.io>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -32,7 +32,7 @@ use Data::Dumper;
 our ($_program, $_version, $_author);
 $_program = 'haproxyng';
 $_version = '1.0.0';
-$_author  = 'Jonathan Wright <github@jon.than.io>';
+$_author  = 'Jonathan Wright <jon@than.io>';
 
 use constant {
   # Field names to locations for all the CSV data provided by HAProxy
