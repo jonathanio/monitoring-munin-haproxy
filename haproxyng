@@ -239,7 +239,7 @@ sub get_data {
             queue     => ($stat[STAT_TIME_QUEUE] || 0),
             connect   => ($stat[STAT_TIME_CONNECT] || 0),
             response  => ($stat[STAT_TIME_RESPONSE] || 0),
-            total     => ($stat[STAT_TIME_TOTAL || 0)]
+            total     => ($stat[STAT_TIME_TOTAL] || 0)
           },
           responses   => {
             total     => ($stat[STAT_RESPONSES_HTTP_1XX] || 0)
