@@ -42,9 +42,11 @@ large number of graphs every five minutes with room to spare and grow!
 You will need Munin 2.0 as this is a `multigraph` plugin and will output all
 graphs in a single run.
 
-   [haproxyng*]
-     env.socket /path/to/socket
-     env.clean prefix-
+```
+[haproxyng*]
+env.socket /path/to/socket
+env.clean prefix-
+```
 
 `haproxyng` takes two environmental options:
 
