@@ -67,6 +67,65 @@ and wait for it to run. Running
 is also possible to verify that it can see everything and output the
 configuration data for Munin.
 
+## Install instructions for debian
+
+Go somewhere and get yourself the haproxyng script
+
+```
+cd /tmp/
+wget -O haproxyng https://raw.githubusercontent.com/thenovacreator/monitoring-munin-haproxy/master/haproxyng  
+```
+
+Copy the script to munins plugin location, create a symlink and set the execution permission
+```
+mv haproxyng /usr/share/munin/plugins/haproxyng
+ln -s /usr/share/munin/plugins/haproxyng /etc/munin/plugins/haproxyng
+chmod 755 /usr/share/munin/plugins/haproxyng
+```
+Install the libswitch-perl package that is needed by the script
+```
+sudo apt-get install libswitch-perl
+```
+Define a socket for the plugin to get the data if not already done so. First you have to open the haproxy config file
+```
+nano /etc/haproxy/haproxy.cfg 
+```
+And put the socket definition into the global section
+```
+global
+  [other config stuff ...]
+
+  stats socket /run/haproxy-user.sock mode 666 level user
+
+  [other config stuff ...]
+```
+As you can see the access rights for this is `666`. This can be a security issue. This is because haproxy creates its files under /run/ with root user and group. So for the munin user to use the socket there must be set the `666` permissions on the socket. After starting haproxy you could change the sockets user group as you want and can use a stronger persmissions set. You could use `chown root:munin /run/haproxy/user.sock` to do that. This is up to you. But keep in mind. As the server restarts the sockets are recreated and in this case could have the wrong permissions.
+
+Now we have to setup munin to use the plugin. Therefor open the munin-node config file
+```
+nano /etc/munin/plugin-conf.d/munin-node
+```
+And add the haproxyng section with the right socket
+```
+[haproxyng*]
+env.socket /run/haproxy-user.sock
+```
+Now restart the munin and haproxy services
+```
+service haproxy restart
+service munin-node restart
+```
+If you want to test if everything is going right executed this command
+```
+munin-run haproxy
+```
+You should be the statistics to be printed
+
+If you do not get errors and the plugin is not working you may take a look the munin log file
+```
+cat /var/log/munin-node.log
+```
+
 ## Licence
 
 This program is free software; you can redistribute it and/or
