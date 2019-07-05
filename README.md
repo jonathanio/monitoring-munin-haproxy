@@ -46,6 +46,7 @@ graphs in a single run.
 [haproxyng*]
 env.socket /path/to/socket
 env.clean prefix-
+env.PATH /usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin:/usr/local/sbin
 ```
 
 `haproxyng` takes two environmental options:
@@ -58,6 +59,8 @@ env.clean prefix-
     generated and everything is prefixed with "staging-" or "production_" then
     put that (or any other regex) into `clean` and it will be cleaned from any
     titles before being output to Munin.
+  * `PATH` define path here if perl cannot be found in your standard path defined
+    by your OS.
 
 Beyond that, copy/symlink it to the `plugins/` directory on the relevant node
 and wait for it to run. Running
